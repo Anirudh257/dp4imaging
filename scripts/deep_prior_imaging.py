@@ -54,8 +54,8 @@ class DeepPriorImaging(object):
         # operators.
         self.imaging_setup = SeismicSetup(self.device,
                                           args.sigma,
-                                          sim_source=True)
-
+                                          sim_source=True
+                                          )
         # Set up HDF5 file to store posterior samples.
         setup_sample_file(args, self.imaging_setup.dm.shape[2:], args.max_itr)
 
@@ -77,6 +77,7 @@ class DeepPriorImaging(object):
             A torch.Tensor containing a float value, the negative log
                 likelihood.
         """
+        # Remove sigma for super-resolution and inpainting tasks.
         return (self.imaging_setup.nsrc / 2.0) * torch.norm(
             (d_pred - d_obs) / sigma)**2
 
@@ -87,18 +88,18 @@ class DeepPriorImaging(object):
             args: An argparse.Namespace, containing command line hyperparameters
                 and data paths.
         """
-        # Create observed data (HDF5 dataset, not fully loaded into memory).
-        d_obs = self.imaging_setup.create_sim_src_data()
 
         # True seismic image (perturbation model) to be used for book keeping.
         dm = (self.imaging_setup.dm).to(self.device)
+        # Create observed data (HDF5 dataset, not fully loaded into memory).
+        d_obs = dm + torch.randn_like(dm).to(self.device) * args.sigma
 
         # Deep prior network and its fixed random input.
         g = DeepPrior(dm.size()).to(self.device)
         z = torch.randn(g.get_latent_shape()).to(self.device)
 
         # Stochastic gradient Langevin dynamics sampling sub-routine.
-        self.sampler = PreconditionedSGLD(g.parameters(),
+        self.sampler = torch.optim.Adam(g.parameters(),
                                           args.lr,
                                           weight_decay=args.wd)
 
@@ -116,29 +117,17 @@ class DeepPriorImaging(object):
                 # Update the learning rate.
                 self.lr_decay(itr)
 
-                # Randomly pick a source experiment
-                idx = np.random.choice(self.imaging_setup.nsrc,
-                                       1,
-                                       replace=False)[0]
-
-                # Create Devito-based Born scattering forward modeling operator
-                # for source position index `idx`. This operator is wrapped as a
-                # pytorch layer to facilitate gradient computation via automatic
-                # differentiation while exploiting Devito's highly optimized
-                # stencil code.
-                forward_op = self.imaging_setup.create_op(src_idx=idx)
-
                 # Compute predicted seismic image via the deep prior
                 # reparameterization.
                 dm_est = g(z)
 
                 # Compute predicted data to match the observed data.
-                d_pred = forward_op(dm_est)
+                d_pred = dm_est
 
                 # Compute the negative-log likelihood.
                 obj = self.negative_log_likelihood(
                     d_pred,
-                    torch.from_numpy(d_obs[idx]).to(self.device), args.sigma)
+                    d_obs, args.sigma)
 
                 # Compute the gradient of negative-log likelihood with respect
                 # to deep prior weights. The gradient contribution of the
